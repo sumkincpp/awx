@@ -3361,6 +3361,8 @@ class JobRelaunch(RetrieveAPIView):
         copy_kwargs = {}
         retry_hosts = serializer.validated_data.get('hosts', None)
         job_type = serializer.validated_data.get('job_type', None)
+        
+        # Handle retry hosts logic
         if retry_hosts and retry_hosts != 'all':
             if obj.status in ACTIVE_STATES:
                 return Response(
@@ -3381,8 +3383,15 @@ class JobRelaunch(RetrieveAPIView):
                 )
             copy_kwargs['limit'] = ','.join(retry_host_list)
 
-        if job_type:
-            copy_kwargs['job_type'] = job_type
+        # Handle all promptable fields
+        promptable_fields = ['inventory', 'limit', 'scm_branch', 'job_tags', 'skip_tags', 
+                           'extra_vars', 'verbosity', 'diff_mode', 'forks', 'job_slice_count', 
+                           'timeout', 'job_type']
+        
+        for field in promptable_fields:
+            if field in serializer.validated_data:
+                copy_kwargs[field] = serializer.validated_data[field]
+
         new_job = obj.copy_unified_job(**copy_kwargs)
         result = new_job.signal_start(**serializer.validated_data['credential_passwords'])
         if not result:

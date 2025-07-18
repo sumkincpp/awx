@@ -115,6 +115,108 @@ def test_job_relaunch_without_creds(post, inventory, project, admin_user):
 
 
 @pytest.mark.django_db
+def test_job_relaunch_with_promptable_fields(post, inventory, project, admin_user):
+    """Test that job relaunch accepts promptable fields when they are allowed."""
+    # Create an inventory and project
+    inventory2 = inventory.organization.inventories.create(name='test-inv2', organization=inventory.organization)
+    
+    # Create a job template with prompting enabled for various fields
+    jt = JobTemplate.objects.create(
+        name='testjt', 
+        inventory=inventory, 
+        project=project,
+        ask_inventory_on_launch=True,
+        ask_limit_on_launch=True,
+        ask_variables_on_launch=True,
+        ask_job_type_on_launch=True,
+        ask_verbosity_on_launch=True,
+        ask_diff_mode_on_launch=True,
+        ask_tags_on_launch=True,
+        ask_skip_tags_on_launch=True,
+        job_type='run'
+    )
+    
+    # Create a job from the template
+    job = jt.create_unified_job()
+    
+    # Test relaunching with modified parameters
+    relaunch_data = {
+        'inventory': inventory2.pk,
+        'limit': 'test-host',
+        'extra_vars': {'test_var': 'test_value'},
+        'job_type': 'check',
+        'verbosity': 2,
+        'diff_mode': True,
+        'job_tags': 'tag1,tag2',
+        'skip_tags': 'skip1,skip2'
+    }
+    
+    r = post(url=reverse('api:job_relaunch', kwargs={'pk': job.pk}), data=relaunch_data, user=admin_user, expect=201)
+    
+    # Verify the new job was created with the modified parameters
+    new_job = Job.objects.get(pk=r.data['job'])
+    assert new_job.inventory == inventory2
+    assert new_job.limit == 'test-host'
+    assert new_job.extra_vars == {'test_var': 'test_value'}
+    assert new_job.job_type == 'check'
+    assert new_job.verbosity == 2
+    assert new_job.diff_mode is True
+    assert new_job.job_tags == 'tag1,tag2'
+    assert new_job.skip_tags == 'skip1,skip2'
+
+
+@pytest.mark.django_db
+def test_job_relaunch_rejects_non_promptable_fields(post, inventory, project, admin_user):
+    """Test that job relaunch rejects fields that are not allowed to be prompted."""
+    inventory2 = inventory.organization.inventories.create(name='test-inv2', organization=inventory.organization)
+    
+    # Create a job template with prompting disabled for inventory
+    jt = JobTemplate.objects.create(
+        name='testjt', 
+        inventory=inventory, 
+        project=project,
+        ask_inventory_on_launch=False,  # Prompting disabled
+        ask_limit_on_launch=False,      # Prompting disabled
+        ask_variables_on_launch=False   # Prompting disabled
+    )
+    
+    # Create a job from the template
+    job = jt.create_unified_job()
+    
+    # Test relaunching with non-promptable fields should fail
+    relaunch_data = {
+        'inventory': inventory2.pk,
+        'limit': 'test-host',
+        'extra_vars': {'test_var': 'test_value'}
+    }
+    
+    r = post(url=reverse('api:job_relaunch', kwargs={'pk': job.pk}), data=relaunch_data, user=admin_user, expect=400)
+    
+    # Check that appropriate errors are returned
+    assert 'inventory' in r.data
+    assert 'limit' in r.data
+    assert 'extra_vars' in r.data
+    assert 'not allowed to be prompted' in str(r.data['inventory'])
+    assert 'not allowed to be prompted' in str(r.data['limit'])
+    assert 'not allowed to be prompted' in str(r.data['extra_vars'])
+
+
+@pytest.mark.django_db
+def test_job_relaunch_backward_compatibility(post, inventory, project, admin_user):
+    """Test that existing relaunch functionality still works as before."""
+    jt = JobTemplate.objects.create(name='testjt', inventory=inventory, project=project)
+    job = jt.create_unified_job()
+    
+    # Test the old-style relaunch without any additional fields
+    r = post(url=reverse('api:job_relaunch', kwargs={'pk': job.pk}), data={}, user=admin_user, expect=201)
+    
+    # Should create a new job
+    new_job = Job.objects.get(pk=r.data['job'])
+    assert new_job.inventory == inventory
+    assert new_job.project == project
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "status,hosts",
     [
