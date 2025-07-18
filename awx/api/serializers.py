@@ -3536,10 +3536,91 @@ class JobRelaunchSerializer(BaseSerializer):
         write_only=True,
     )
     credential_passwords = VerbatimField(required=True, write_only=True)
+    
+    # Additional promptable fields
+    inventory = serializers.PrimaryKeyRelatedField(
+        queryset=None,  # Set dynamically in __init__
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Inventory to run the job against.")
+    )
+    limit = serializers.CharField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Further limit selected hosts to an additional pattern.")
+    )
+    scm_branch = serializers.CharField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Branch to use from source control.")
+    )
+    job_tags = serializers.CharField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Playbook tags to apply.")
+    )
+    skip_tags = serializers.CharField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Playbook tags to skip.")
+    )
+    extra_vars = VerbatimField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("YAML or JSON formatted extra variables to pass to the playbook.")
+    )
+    verbosity = serializers.ChoiceField(
+        required=False,
+        allow_null=True,
+        choices=VERBOSITY_CHOICES,
+        write_only=True,
+        help_text=_("Verbosity level for the job.")
+    )
+    diff_mode = serializers.BooleanField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Enable diff mode for the job.")
+    )
+    forks = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Number of parallel processes to use.")
+    )
+    job_slice_count = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Number of slices to split the job into.")
+    )
+    timeout = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Timeout in seconds for the job.")
+    )
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set the inventory queryset dynamically based on the user's permissions
+        if self.context.get('request'):
+            user = self.context['request'].user
+            # Import here to avoid circular imports
+            from awx.main.models import Inventory
+            self.fields['inventory'].queryset = Inventory.accessible_objects(user, 'use_role')
 
     class Meta:
         model = Job
-        fields = ('passwords_needed_to_start', 'retry_counts', 'hosts', 'job_type', 'credential_passwords')
+        fields = ('passwords_needed_to_start', 'retry_counts', 'hosts', 'job_type', 'credential_passwords',
+                 'inventory', 'limit', 'scm_branch', 'job_tags', 'skip_tags', 'extra_vars', 'verbosity',
+                 'diff_mode', 'forks', 'job_slice_count', 'timeout')
 
     def validate_credential_passwords(self, value):
         pnts = self.instance.passwords_needed_to_start
@@ -3580,6 +3661,33 @@ class JobRelaunchSerializer(BaseSerializer):
             raise serializers.ValidationError(dict(errors=[_("Job Template Project is missing or undefined.")]))
         if obj.inventory is None or obj.inventory.pending_deletion:
             raise serializers.ValidationError(dict(errors=[_("Job Template Inventory is missing or undefined.")]))
+        
+        # Validate that only promptable fields are provided
+        if obj.job_template:
+            template = obj.job_template
+            ask_mapping = template.get_ask_mapping()
+            errors = {}
+            
+            # Check each field that can be prompted
+            for field_name, ask_field_name in ask_mapping.items():
+                if field_name in attrs:
+                    # Check if the field is allowed to be prompted
+                    if not getattr(template, ask_field_name, False):
+                        errors[field_name] = [_("Field is not allowed to be prompted at launch.")]
+            
+            # Special validation for extra_vars
+            if 'extra_vars' in attrs and not template.ask_variables_on_launch:
+                errors['extra_vars'] = [_("Field is not allowed to be prompted at launch.")]
+            
+            # Special validation for job_type (already allowed in current implementation)
+            if 'job_type' in attrs and not template.ask_job_type_on_launch:
+                # Only allow if it's the same as the template's job_type
+                if attrs['job_type'] != template.job_type:
+                    errors['job_type'] = [_("Field is not allowed to be prompted at launch.")]
+            
+            if errors:
+                raise serializers.ValidationError(errors)
+        
         attrs = super(JobRelaunchSerializer, self).validate(attrs)
         return attrs
 
